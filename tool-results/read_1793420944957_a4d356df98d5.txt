@@ -1,0 +1,820 @@
+     1→/**
+     2→ * OMNIRA — React Query hooks (server state)
+     3→ * Copyright KINGSTECH PLC (evolved from PHARMORA)
+     4→ *
+     5→ * Central query keys + typed hooks for every API endpoint. Mutations
+     6→ * invalidate the affected keys so views stay consistent.
+     7→ */
+     8→
+     9→'use client';
+    10→
+    11→import { useMutation, useQuery, useQueryClient, type UseMutationOptions } from '@tanstack/react-query';
+    12→import { get, post, patch, del } from '@/lib/client/api';
+    13→import type {
+    14→  AdjustmentPayload,
+    15→  AiInsightDTO,
+    16→  AuditLogDTO,
+    17→  AuthContextDTO,
+    18→  BranchDTO,
+    19→  CashSessionDTO,
+    20→  CategoryDTO,
+    21→  CheckoutPayload,
+    22→  CheckoutResultDTO,
+    23→  CustomerDTO,
+    24→  DashboardDTO,
+    25→  ExpenseDTO,
+    26→  InventoryLevelDTO,
+    27→  ListResponse,
+    28→  MembershipDTO,
+    29→  OrgSettingsDTO,
+    30→  OrganizationDetailDTO,
+    31→  OrganizationListItemDTO,
+    32→  PermissionDTO,
+    33→  PlanDTO,
+    34→  PlatformOverviewDTO,
+    35→  PosContextDTO,
+    36→  PosProductDTO,
+    37→  ProductDTO,
+    38→  PurchaseOrderDTO,
+    39→  PurchaseOrderPayload,
+    40→  ReceiveStockPayload,
+    41→  RefundPayload,
+    42→  ReportsDTO,
+    43→  RoleDTO,
+    44→  SaleDetailDTO,
+    45→  SaleListItemDTO,
+    46→  StockMovementDTO,
+    47→  SupplierDTO,
+    48→  TransferPayload,
+    49→  UserListItemDTO,
+    50→  WarehouseDTO,
+    51→  BatchDTO,
+    52→  ModuleDTO,
+    53→  CreateOrganizationPayload,
+    54→} from '@/types/api';
+    55→
+    56→// ---------------------------------------------------------------------------
+    57→// Query keys
+    58→// ---------------------------------------------------------------------------
+    59→
+    60→export const queryKeys = {
+    61→  authContext: ['auth', 'context'] as const,
+    62→  platformOverview: ['platform', 'overview'] as const,
+    63→  plans: ['platform', 'plans'] as const,
+    64→  organizations: ['organizations'] as const,
+    65→  organization: (id: string) => ['organizations', id] as const,
+    66→  branches: ['branches'] as const,
+    67→  warehouses: ['warehouses'] as const,
+    68→  users: ['users'] as const,
+    69→  roles: ['roles'] as const,
+    70→  permissions: ['permissions'] as const,
+    71→  auditLogs: (filters?: Record<string, string>) => ['audit-logs', filters ?? {}] as const,
+    72→  settings: ['settings'] as const,
+    73→  categories: ['product-categories'] as const,
+    74→  products: (filters?: Record<string, string | undefined>) => ['products', filters ?? {}] as const,
+    75→  suppliers: ['suppliers'] as const,
+    76→  inventoryLevels: (filters?: Record<string, string | undefined>) => ['inventory', 'levels', filters ?? {}] as const,
+    77→  inventoryMovements: (filters?: Record<string, string | undefined>) => ['inventory', 'movements', filters ?? {}] as const,
+    78→  inventoryBatches: (filters?: Record<string, string | undefined>) => ['inventory', 'batches', filters ?? {}] as const,
+    79→  purchaseOrders: (filters?: Record<string, string | undefined>) => ['purchase-orders', filters ?? {}] as const,
+    80→  purchaseOrder: (id: string) => ['purchase-orders', 'detail', id] as const,
+    81→  customers: (filters?: Record<string, string | undefined>) => ['customers', filters ?? {}] as const,
+    82→  customer: (id: string) => ['customers', 'detail', id] as const,
+    83→  posContext: ['pos', 'context'] as const,
+    84→  posCatalog: (warehouseId?: string, search?: string) => ['pos', 'catalog', warehouseId ?? 'all', search ?? ''] as const,
+    85→  sales: (filters?: Record<string, string | undefined>) => ['sales', filters ?? {}] as const,
+    86→  sale: (id: string) => ['sales', 'detail', id] as const,
+    87→  cashSessions: (status?: string) => ['cash-sessions', status ?? 'all'] as const,
+    88→  expenses: (filters?: Record<string, string | undefined>) => ['expenses', filters ?? {}] as const,
+    89→  dashboard: ['dashboard'] as const,
+    90→  reports: (from?: string, to?: string) => ['reports', from ?? '', to ?? ''] as const,
+    91→  insights: ['insights'] as const,
+    92→};
+    93→
+    94→// ---------------------------------------------------------------------------
+    95→// Auth
+    96→// ---------------------------------------------------------------------------
+    97→
+    98→export function useAuthContext() {
+    99→  return useQuery<AuthContextDTO>({
+   100→    queryKey: queryKeys.authContext,
+   101→    queryFn: () => get<AuthContextDTO>('/api/auth/context'),
+   102→    staleTime: 30_000,
+   103→    retry: false,
+   104→  });
+   105→}
+   106→
+   107→export function useSwitchOrganization() {
+   108→  const qc = useQueryClient();
+   109→  return useMutation({
+   110→    mutationFn: (organizationId: string | null) =>
+   111→      post<AuthContextDTO>('/api/auth/switch-organization', { organizationId }),
+   112→    onSuccess: () => {
+   113→      // Full refetch of every tenant-scoped query.
+   114→      qc.clear();
+   115→      void qc.refetchQueries({ queryKey: queryKeys.authContext });
+   116→    },
+   117→  });
+   118→}
+   119→
+   120→export function useLogout() {
+   121→  return useMutation({
+   122→    mutationFn: () => post<void>('/api/auth/logout'),
+   123→    onSuccess: () => {
+   124→      window.location.hash = '';
+   125→      window.location.reload();
+   126→    },
+   127→  });
+   128→}
+   129→
+   130→// ---------------------------------------------------------------------------
+   131→// Platform console
+   132→// ---------------------------------------------------------------------------
+   133→
+   134→export function usePlatformOverview() {
+   135→  return useQuery<PlatformOverviewDTO>({
+   136→    queryKey: queryKeys.platformOverview,
+   137→    queryFn: () => get<PlatformOverviewDTO>('/api/platform/overview'),
+   138→  });
+   139→}
+   140→
+   141→export function usePlans() {
+   142→  return useQuery<PlanDTO[]>({ queryKey: queryKeys.plans, queryFn: () => get<PlanDTO[]>('/api/platform/plans') });
+   143→}
+   144→
+   145→export function useOrganizations() {
+   146→  return useQuery<OrganizationListItemDTO[]>({
+   147→    queryKey: queryKeys.organizations,
+   148→    queryFn: () => get<OrganizationListItemDTO[]>('/api/organizations'),
+   149→  });
+   150→}
+   151→
+   152→export function useOrganization(id: string) {
+   153→  return useQuery<OrganizationDetailDTO>({
+   154→    queryKey: queryKeys.organization(id),
+   155→    queryFn: () => get<OrganizationDetailDTO>(`/api/organizations/${id}`),
+   156→    enabled: !!id,
+   157→  });
+   158→}
+   159→
+   160→export function useCreateOrganization() {
+   161→  const qc = useQueryClient();
+   162→  return useMutation({
+   163→    mutationFn: (payload: CreateOrganizationPayload) =>
+   164→      post<OrganizationListItemDTO>('/api/organizations', payload),
+   165→    onSuccess: () => {
+   166→      void qc.invalidateQueries({ queryKey: queryKeys.organizations });
+   167→      void qc.invalidateQueries({ queryKey: queryKeys.platformOverview });
+   168→    },
+   169→  });
+   170→}
+   171→
+   172→export function useUpdateOrganization(id: string) {
+   173→  const qc = useQueryClient();
+   174→  return useMutation({
+   175→    mutationFn: (payload: Partial<OrganizationDetailDTO> & { planCode?: string; action?: string }) =>
+   176→      patch<OrganizationDetailDTO>(`/api/organizations/${id}`, payload),
+   177→    onSuccess: () => {
+   178→      void qc.invalidateQueries({ queryKey: queryKeys.organizations });
+   179→      void qc.invalidateQueries({ queryKey: queryKeys.organization(id) });
+   180→      void qc.invalidateQueries({ queryKey: queryKeys.platformOverview });
+   181→    },
+   182→  });
+   183→}
+   184→
+   185→// ---------------------------------------------------------------------------
+   186→// Org structure
+   187→// ---------------------------------------------------------------------------
+   188→
+   189→export function useBranches() {
+   190→  return useQuery<BranchDTO[]>({ queryKey: queryKeys.branches, queryFn: () => get<BranchDTO[]>('/api/branches') });
+   191→}
+   192→
+   193→export function useCreateBranch() {
+   194→  const qc = useQueryClient();
+   195→  return useMutation({
+   196→    mutationFn: (payload: Omit<BranchDTO, 'id' | 'createdAt' | 'isActive' | 'warehouses'> & { isActive?: boolean }) =>
+   197→      post<BranchDTO>('/api/branches', payload),
+   198→    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.branches }),
+   199→  });
+   200→}
+   201→
+   202→export function useUpdateBranch() {
+   203→  const qc = useQueryClient();
+   204→  return useMutation({
+   205→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   206→      patch<BranchDTO>(`/api/branches/${id}`, payload),
+   207→    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.branches }),
+   208→  });
+   209→}
+   210→
+   211→export function useWarehouses() {
+   212→  return useQuery<WarehouseDTO[]>({ queryKey: queryKeys.warehouses, queryFn: () => get<WarehouseDTO[]>('/api/warehouses') });
+   213→}
+   214→
+   215→export function useCreateWarehouse() {
+   216→  const qc = useQueryClient();
+   217→  return useMutation({
+   218→    mutationFn: (payload: { name: string; code: string; type: string; branchId?: string | null }) =>
+   219→      post<WarehouseDTO>('/api/warehouses', payload),
+   220→    onSuccess: () => {
+   221→      void qc.invalidateQueries({ queryKey: queryKeys.warehouses });
+   222→      void qc.invalidateQueries({ queryKey: queryKeys.posContext });
+   223→    },
+   224→  });
+   225→}
+   226→
+   227→export function useUpdateWarehouse() {
+   228→  const qc = useQueryClient();
+   229→  return useMutation({
+   230→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   231→      patch<WarehouseDTO>(`/api/warehouses/${id}`, payload),
+   232→    onSuccess: () => qc.invalidateQueries({ queryKey: queryKeys.warehouses }),
+   233→  });
+   234→}
+   235→
+   236→// ---------------------------------------------------------------------------
+   237→// Users, roles, permissions
+   238→// ---------------------------------------------------------------------------
+   239→
+   240→export function useUsers() {
+   241→  return useQuery<UserListItemDTO[]>({ queryKey: queryKeys.users, queryFn: () => get<UserListItemDTO[]>('/api/users') });
+   242→}
+   243→
+   244→export function useCreateUser() {
+   245→  const qc = useQueryClient();
+   246→  return useMutation({
+   247→    mutationFn: (payload: { fullName: string; email: string; password: string; phone?: string; roleIds: string[] }) =>
+   248→      post<UserListItemDTO>('/api/users', payload),
+   249→    onSuccess: () => {
+   250→      void qc.invalidateQueries({ queryKey: queryKeys.users });
+   251→    },
+   252→  });
+   253→}
+   254→
+   255→export function useUpdateUser() {
+   256→  const qc = useQueryClient();
+   257→  return useMutation({
+   258→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   259→      patch<UserListItemDTO>(`/api/users/${id}`, payload),
+   260→    onSuccess: () => {
+   261→      void qc.invalidateQueries({ queryKey: queryKeys.users });
+   262→    },
+   263→  });
+   264→}
+   265→
+   266→export function useRoles() {
+   267→  return useQuery<RoleDTO[]>({ queryKey: queryKeys.roles, queryFn: () => get<RoleDTO[]>('/api/roles') });
+   268→}
+   269→
+   270→export function useCreateRole() {
+   271→  const qc = useQueryClient();
+   272→  return useMutation({
+   273→    mutationFn: (payload: { name: string; description?: string; permissions: string[] }) =>
+   274→      post<RoleDTO>('/api/roles', payload),
+   275→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.roles }),
+   276→  });
+   277→}
+   278→
+   279→export function useUpdateRole() {
+   280→  const qc = useQueryClient();
+   281→  return useMutation({
+   282→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   283→      patch<RoleDTO>(`/api/roles/${id}`, payload),
+   284→    onSuccess: (_data, variables) => {
+   285→      void qc.invalidateQueries({ queryKey: queryKeys.roles });
+   286→      void qc.invalidateQueries({ queryKey: queryKeys.users });
+   287→      void qc.refetchQueries({ queryKey: queryKeys.authContext });
+   288→    },
+   289→  });
+   290→}
+   291→
+   292→export function useDeleteRole() {
+   293→  const qc = useQueryClient();
+   294→  return useMutation({
+   295→    mutationFn: (id: string) => del<void>(`/api/roles/${id}`),
+   296→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.roles }),
+   297→  });
+   298→}
+   299→
+   300→export function usePermissions() {
+   301→  return useQuery<{ permissions: PermissionDTO[]; modules: ModuleDTO[] }>({
+   302→    queryKey: queryKeys.permissions,
+   303→    queryFn: () => get<{ permissions: PermissionDTO[]; modules: ModuleDTO[] }>('/api/permissions'),
+   304→    staleTime: 5 * 60_000,
+   305→  });
+   306→}
+   307→
+   308→// ---------------------------------------------------------------------------
+   309→// Audit
+   310→// ---------------------------------------------------------------------------
+   311→
+   312→export function useAuditLogs(filters: Record<string, string> = {}) {
+   313→  const params = new URLSearchParams(filters).toString();
+   314→  return useQuery<AuditLogDTO[]>({
+   315→    queryKey: queryKeys.auditLogs(filters),
+   316→    queryFn: () => get<AuditLogDTO[]>(`/api/audit-logs${params ? `?${params}` : ''}`),
+   317→  });
+   318→}
+   319→
+   320→// ---------------------------------------------------------------------------
+   321→// Settings
+   322→// ---------------------------------------------------------------------------
+   323→
+   324→export function useSettings() {
+   325→  return useQuery<OrgSettingsDTO>({ queryKey: queryKeys.settings, queryFn: () => get<OrgSettingsDTO>('/api/settings') });
+   326→}
+   327→
+   328→export function useUpdateSettings() {
+   329→  const qc = useQueryClient();
+   330→  return useMutation({
+   331→    mutationFn: (payload: Record<string, unknown>) => patch<OrgSettingsDTO>('/api/settings', payload),
+   332→    onSuccess: () => {
+   333→      void qc.invalidateQueries({ queryKey: queryKeys.settings });
+   334→      void qc.refetchQueries({ queryKey: queryKeys.authContext });
+   335→    },
+   336→  });
+   337→}
+   338→
+   339→// ---------------------------------------------------------------------------
+   340→// Catalog
+   341→// ---------------------------------------------------------------------------
+   342→
+   343→export function useCategories() {
+   344→  return useQuery<CategoryDTO[]>({ queryKey: queryKeys.categories, queryFn: () => get<CategoryDTO[]>('/api/product-categories') });
+   345→}
+   346→
+   347→export function useCreateCategory() {
+   348→  const qc = useQueryClient();
+   349→  return useMutation({
+   350→    mutationFn: (payload: { name: string; description?: string }) =>
+   351→      post<CategoryDTO>('/api/product-categories', payload),
+   352→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.categories }),
+   353→  });
+   354→}
+   355→
+   356→export function useUpdateCategory() {
+   357→  const qc = useQueryClient();
+   358→  return useMutation({
+   359→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   360→      patch<CategoryDTO>(`/api/product-categories/${id}`, payload),
+   361→    onSuccess: () => {
+   362→      void qc.invalidateQueries({ queryKey: queryKeys.categories });
+   363→      void qc.invalidateQueries({ queryKey: ['products'] });
+   364→    },
+   365→  });
+   366→}
+   367→
+   368→export function useDeleteCategory() {
+   369→  const qc = useQueryClient();
+   370→  return useMutation({
+   371→    mutationFn: (id: string) => del<void>(`/api/product-categories/${id}`),
+   372→    onSuccess: () => {
+   373→      void qc.invalidateQueries({ queryKey: queryKeys.categories });
+   374→      void qc.invalidateQueries({ queryKey: ['products'] });
+   375→    },
+   376→  });
+   377→}
+   378→
+   379→export function useProducts(filters: Record<string, string | undefined> = {}) {
+   380→  const params = new URLSearchParams();
+   381→  Object.entries(filters).forEach(([k, v]) => {
+   382→    if (v) params.set(k, v);
+   383→  });
+   384→  const qs = params.toString();
+   385→  return useQuery<ProductDTO[]>({
+   386→    queryKey: queryKeys.products(filters),
+   387→    queryFn: () => get<ProductDTO[]>(`/api/products${qs ? `?${qs}` : ''}`),
+   388→  });
+   389→}
+   390→
+   391→export function useCreateProduct() {
+   392→  const qc = useQueryClient();
+   393→  return useMutation({
+   394→    mutationFn: (payload: Record<string, unknown>) => post<ProductDTO>('/api/products', payload),
+   395→    onSuccess: () => {
+   396→      void qc.invalidateQueries({ queryKey: ['products'] });
+   397→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   398→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   399→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   400→    },
+   401→  });
+   402→}
+   403→
+   404→export function useUpdateProduct() {
+   405→  const qc = useQueryClient();
+   406→  return useMutation({
+   407→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   408→      patch<ProductDTO>(`/api/products/${id}`, payload),
+   409→    onSuccess: () => {
+   410→      void qc.invalidateQueries({ queryKey: ['products'] });
+   411→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   412→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   413→    },
+   414→  });
+   415→}
+   416→
+   417→export function useSuppliers() {
+   418→  return useQuery<SupplierDTO[]>({ queryKey: queryKeys.suppliers, queryFn: () => get<SupplierDTO[]>('/api/suppliers') });
+   419→}
+   420→
+   421→export function useCreateSupplier() {
+   422→  const qc = useQueryClient();
+   423→  return useMutation({
+   424→    mutationFn: (payload: Record<string, unknown>) => post<SupplierDTO>('/api/suppliers', payload),
+   425→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.suppliers }),
+   426→  });
+   427→}
+   428→
+   429→export function useUpdateSupplier() {
+   430→  const qc = useQueryClient();
+   431→  return useMutation({
+   432→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   433→      patch<SupplierDTO>(`/api/suppliers/${id}`, payload),
+   434→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.suppliers }),
+   435→  });
+   436→}
+   437→
+   438→// ---------------------------------------------------------------------------
+   439→// Inventory
+   440→// ---------------------------------------------------------------------------
+   441→
+   442→export function useInventoryLevels(filters: Record<string, string | undefined> = {}) {
+   443→  const params = new URLSearchParams();
+   444→  Object.entries(filters).forEach(([k, v]) => {
+   445→    if (v) params.set(k, v);
+   446→  });
+   447→  const qs = params.toString();
+   448→  return useQuery<InventoryLevelDTO[]>({
+   449→    queryKey: queryKeys.inventoryLevels(filters),
+   450→    queryFn: () => get<InventoryLevelDTO[]>(`/api/inventory/levels${qs ? `?${qs}` : ''}`),
+   451→  });
+   452→}
+   453→
+   454→export function useStockMovements(filters: Record<string, string | undefined> = {}) {
+   455→  const params = new URLSearchParams();
+   456→  Object.entries(filters).forEach(([k, v]) => {
+   457→    if (v) params.set(k, v);
+   458→  });
+   459→  const qs = params.toString();
+   460→  return useQuery<StockMovementDTO[]>({
+   461→    queryKey: queryKeys.inventoryMovements(filters),
+   462→    queryFn: () => get<StockMovementDTO[]>(`/api/inventory/movements${qs ? `?${qs}` : ''}`),
+   463→  });
+   464→}
+   465→
+   466→export function useBatches(filters: Record<string, string | undefined> = {}) {
+   467→  const params = new URLSearchParams();
+   468→  Object.entries(filters).forEach(([k, v]) => {
+   469→    if (v) params.set(k, v);
+   470→  });
+   471→  const qs = params.toString();
+   472→  return useQuery<BatchDTO[]>({
+   473→    queryKey: queryKeys.inventoryBatches(filters),
+   474→    queryFn: () => get<BatchDTO[]>(`/api/inventory/batches${qs ? `?${qs}` : ''}`),
+   475→  });
+   476→}
+   477→
+   478→export function useReceiveStock() {
+   479→  const qc = useQueryClient();
+   480→  return useMutation({
+   481→    mutationFn: (payload: ReceiveStockPayload) =>
+   482→      post<{ received: number; reference: string }>('/api/inventory/receive', payload),
+   483→    onSuccess: () => {
+   484→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   485→      void qc.invalidateQueries({ queryKey: ['products'] });
+   486→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   487→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   488→    },
+   489→  });
+   490→}
+   491→
+   492→export function useAdjustStock() {
+   493→  const qc = useQueryClient();
+   494→  return useMutation({
+   495→    mutationFn: (payload: AdjustmentPayload) =>
+   496→      post<{ reference: string }>('/api/inventory/adjustments', payload),
+   497→    onSuccess: () => {
+   498→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   499→      void qc.invalidateQueries({ queryKey: ['products'] });
+   500→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   501→    },
+   502→  });
+   503→}
+   504→
+   505→export function useTransferStock() {
+   506→  const qc = useQueryClient();
+   507→  return useMutation({
+   508→    mutationFn: (payload: TransferPayload) =>
+   509→      post<{ reference: string }>('/api/inventory/transfers', payload),
+   510→    onSuccess: () => {
+   511→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   512→      void qc.invalidateQueries({ queryKey: ['products'] });
+   513→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   514→    },
+   515→  });
+   516→}
+   517→
+   518→// ---------------------------------------------------------------------------
+   519→// Purchasing
+   520→// ---------------------------------------------------------------------------
+   521→
+   522→export function usePurchaseOrders(filters: Record<string, string | undefined> = {}) {
+   523→  const params = new URLSearchParams();
+   524→  Object.entries(filters).forEach(([k, v]) => {
+   525→    if (v) params.set(k, v);
+   526→  });
+   527→  const qs = params.toString();
+   528→  return useQuery<PurchaseOrderDTO[]>({
+   529→    queryKey: queryKeys.purchaseOrders(filters),
+   530→    queryFn: () => get<PurchaseOrderDTO[]>(`/api/purchase-orders${qs ? `?${qs}` : ''}`),
+   531→  });
+   532→}
+   533→
+   534→export function usePurchaseOrder(id: string) {
+   535→  return useQuery<PurchaseOrderDTO>({
+   536→    queryKey: queryKeys.purchaseOrder(id),
+   537→    queryFn: () => get<PurchaseOrderDTO>(`/api/purchase-orders/${id}`),
+   538→    enabled: !!id,
+   539→  });
+   540→}
+   541→
+   542→export function useCreatePurchaseOrder() {
+   543→  const qc = useQueryClient();
+   544→  return useMutation({
+   545→    mutationFn: (payload: PurchaseOrderPayload) => post<PurchaseOrderDTO>('/api/purchase-orders', payload),
+   546→    onSuccess: () => void qc.invalidateQueries({ queryKey: ['purchase-orders'] }),
+   547→  });
+   548→}
+   549→
+   550→export function usePurchaseOrderAction() {
+   551→  const qc = useQueryClient();
+   552→  return useMutation({
+   553→    mutationFn: ({ id, action, payload }: { id: string; action: 'approve' | 'cancel'; payload?: Record<string, unknown> }) =>
+   554→      post<PurchaseOrderDTO>(`/api/purchase-orders/${id}/${action}`, payload ?? {}),
+   555→    onSuccess: (_data, variables) => {
+   556→      void qc.invalidateQueries({ queryKey: ['purchase-orders'] });
+   557→      void qc.refetchQueries({ queryKey: queryKeys.purchaseOrder(variables.id) });
+   558→    },
+   559→  });
+   560→}
+   561→
+   562→export function useReceivePurchaseOrder() {
+   563→  const qc = useQueryClient();
+   564→  return useMutation({
+   565→    mutationFn: ({
+   566→      id,
+   567→      items,
+   568→    }: {
+   569→      id: string;
+   570→      items: { itemId: string; quantity: number; batchNumber?: string; expiryDate?: string | null }[];
+   571→    }) => post<PurchaseOrderDTO>(`/api/purchase-orders/${id}/receive`, { items }),
+   572→    onSuccess: () => {
+   573→      void qc.invalidateQueries({ queryKey: ['purchase-orders'] });
+   574→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   575→      void qc.invalidateQueries({ queryKey: ['products'] });
+   576→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   577→    },
+   578→  });
+   579→}
+   580→
+   581→// ---------------------------------------------------------------------------
+   582→// Customers
+   583→// ---------------------------------------------------------------------------
+   584→
+   585→export function useCustomers(filters: Record<string, string | undefined> = {}) {
+   586→  const params = new URLSearchParams();
+   587→  Object.entries(filters).forEach(([k, v]) => {
+   588→    if (v) params.set(k, v);
+   589→  });
+   590→  const qs = params.toString();
+   591→  return useQuery<CustomerDTO[]>({
+   592→    queryKey: queryKeys.customers(filters),
+   593→    queryFn: () => get<CustomerDTO[]>(`/api/customers${qs ? `?${qs}` : ''}`),
+   594→  });
+   595→}
+   596→
+   597→export function useCustomer(id: string) {
+   598→  return useQuery<CustomerDTO & { recentSales: SaleListItemDTO[] }>({
+   599→    queryKey: queryKeys.customer(id),
+   600→    queryFn: () => get<CustomerDTO & { recentSales: SaleListItemDTO[] }>(`/api/customers/${id}`),
+   601→    enabled: !!id,
+   602→  });
+   603→}
+   604→
+   605→export function useCreateCustomer() {
+   606→  const qc = useQueryClient();
+   607→  return useMutation({
+   608→    mutationFn: (payload: Record<string, unknown>) => post<CustomerDTO>('/api/customers', payload),
+   609→    onSuccess: () => {
+   610→      void qc.invalidateQueries({ queryKey: ['customers'] });
+   611→      void qc.invalidateQueries({ queryKey: queryKeys.posContext });
+   612→    },
+   613→  });
+   614→}
+   615→
+   616→export function useUpdateCustomer() {
+   617→  const qc = useQueryClient();
+   618→  return useMutation({
+   619→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   620→      patch<CustomerDTO>(`/api/customers/${id}`, payload),
+   621→    onSuccess: () => void qc.invalidateQueries({ queryKey: ['customers'] }),
+   622→  });
+   623→}
+   624→
+   625→// ---------------------------------------------------------------------------
+   626→// POS & sales
+   627→// ---------------------------------------------------------------------------
+   628→
+   629→export function usePosContext() {
+   630→  return useQuery<PosContextDTO>({
+   631→    queryKey: queryKeys.posContext,
+   632→    queryFn: () => get<PosContextDTO>('/api/pos/context'),
+   633→    staleTime: 15_000,
+   634→  });
+   635→}
+   636→
+   637→export function usePosCatalog(warehouseId?: string, search?: string) {
+   638→  const params = new URLSearchParams();
+   639→  if (warehouseId) params.set('warehouseId', warehouseId);
+   640→  if (search) params.set('search', search);
+   641→  const qs = params.toString();
+   642→  return useQuery<PosProductDTO[]>({
+   643→    queryKey: queryKeys.posCatalog(warehouseId, search),
+   644→    queryFn: () => get<PosProductDTO[]>(`/api/pos/catalog${qs ? `?${qs}` : ''}`),
+   645→  });
+   646→}
+   647→
+   648→export function useCheckout() {
+   649→  const qc = useQueryClient();
+   650→  return useMutation({
+   651→    mutationFn: (payload: CheckoutPayload) => post<CheckoutResultDTO>('/api/sales', payload),
+   652→    onSuccess: () => {
+   653→      void qc.invalidateQueries({ queryKey: ['sales'] });
+   654→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   655→      void qc.invalidateQueries({ queryKey: ['pos', 'context'] });
+   656→      void qc.invalidateQueries({ queryKey: ['inventory'] });
+   657→      void qc.invalidateQueries({ queryKey: ['cash-sessions'] });
+   658→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   659→    },
+   660→  });
+   661→}
+   662→
+   663→export function useSales(filters: Record<string, string | undefined> = {}) {
+   664→  const params = new URLSearchParams();
+   665→  Object.entries(filters).forEach(([k, v]) => {
+   666→    if (v) params.set(k, v);
+   667→  });
+   668→  const qs = params.toString();
+   669→  return useQuery<SaleListItemDTO[]>({
+   670→    queryKey: queryKeys.sales(filters),
+   671→    queryFn: () => get<SaleListItemDTO[]>(`/api/sales${qs ? `?${qs}` : ''}`),
+   672→  });
+   673→}
+   674→
+   675→export function useSale(id: string) {
+   676→  return useQuery<SaleDetailDTO>({
+   677→    queryKey: queryKeys.sale(id),
+   678→    queryFn: () => get<SaleDetailDTO>(`/api/sales/${id}`),
+   679→    enabled: !!id,
+   680→  });
+   681→}
+   682→
+   683→export function useVoidSale() {
+   684→  const qc = useQueryClient();
+   685→  return useMutation({
+   686→    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
+   687→      post<SaleDetailDTO>(`/api/sales/${id}/void`, { reason }),
+   688→    onSuccess: (_data, variables) => {
+   689→      void qc.invalidateQueries({ queryKey: ['sales'] });
+   690→      void qc.refetchQueries({ queryKey: queryKeys.sale(variables.id) });
+   691→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   692→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   693→    },
+   694→  });
+   695→}
+   696→
+   697→export function useRefundSale() {
+   698→  const qc = useQueryClient();
+   699→  return useMutation({
+   700→    mutationFn: ({ id, ...payload }: { id: string } & RefundPayload) =>
+   701→      post<SaleDetailDTO>(`/api/sales/${id}/refund`, payload),
+   702→    onSuccess: (_data, variables) => {
+   703→      void qc.invalidateQueries({ queryKey: ['sales'] });
+   704→      void qc.refetchQueries({ queryKey: queryKeys.sale(variables.id) });
+   705→      void qc.invalidateQueries({ queryKey: ['pos', 'catalog'] });
+   706→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   707→    },
+   708→  });
+   709→}
+   710→
+   711→export function useCashSessions(status?: string) {
+   712→  return useQuery<CashSessionDTO[]>({
+   713→    queryKey: queryKeys.cashSessions(status),
+   714→    queryFn: () => get<CashSessionDTO[]>(`/api/sales/cash-sessions${status ? `?status=${status}` : ''}`),
+   715→  });
+   716→}
+   717→
+   718→export function useOpenCashSession() {
+   719→  const qc = useQueryClient();
+   720→  return useMutation({
+   721→    mutationFn: (payload: { openingFloat: number }) =>
+   722→      post<CashSessionDTO>('/api/sales/cash-sessions', payload),
+   723→    onSuccess: () => {
+   724→      void qc.invalidateQueries({ queryKey: ['cash-sessions'] });
+   725→      void qc.invalidateQueries({ queryKey: queryKeys.posContext });
+   726→    },
+   727→  });
+   728→}
+   729→
+   730→export function useCloseCashSession() {
+   731→  const qc = useQueryClient();
+   732→  return useMutation({
+   733→    mutationFn: ({ id, ...payload }: { id: string; countedCash: number; note?: string }) =>
+   734→      post<CashSessionDTO>(`/api/sales/cash-sessions/${id}/close`, payload),
+   735→    onSuccess: () => {
+   736→      void qc.invalidateQueries({ queryKey: ['cash-sessions'] });
+   737→      void qc.invalidateQueries({ queryKey: queryKeys.posContext });
+   738→    },
+   739→  });
+   740→}
+   741→
+   742→// ---------------------------------------------------------------------------
+   743→// Expenses
+   744→// ---------------------------------------------------------------------------
+   745→
+   746→export function useExpenses(filters: Record<string, string | undefined> = {}) {
+   747→  const params = new URLSearchParams();
+   748→  Object.entries(filters).forEach(([k, v]) => {
+   749→    if (v) params.set(k, v);
+   750→  });
+   751→  const qs = params.toString();
+   752→  return useQuery<ExpenseDTO[]>({
+   753→    queryKey: queryKeys.expenses(filters),
+   754→    queryFn: () => get<ExpenseDTO[]>(`/api/expenses${qs ? `?${qs}` : ''}`),
+   755→  });
+   756→}
+   757→
+   758→export function useCreateExpense() {
+   759→  const qc = useQueryClient();
+   760→  return useMutation({
+   761→    mutationFn: (payload: Record<string, unknown>) => post<ExpenseDTO>('/api/expenses', payload),
+   762→    onSuccess: () => {
+   763→      void qc.invalidateQueries({ queryKey: ['expenses'] });
+   764→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   765→    },
+   766→  });
+   767→}
+   768→
+   769→export function useUpdateExpense() {
+   770→  const qc = useQueryClient();
+   771→  return useMutation({
+   772→    mutationFn: ({ id, ...payload }: { id: string } & Record<string, unknown>) =>
+   773→      patch<ExpenseDTO>(`/api/expenses/${id}`, payload),
+   774→    onSuccess: () => {
+   775→      void qc.invalidateQueries({ queryKey: ['expenses'] });
+   776→      void qc.invalidateQueries({ queryKey: queryKeys.dashboard });
+   777→    },
+   778→  });
+   779→}
+   780→
+   781→// ---------------------------------------------------------------------------
+   782→// Dashboard, reports, insights
+   783→// ---------------------------------------------------------------------------
+   784→
+   785→export function useDashboard() {
+   786→  return useQuery<DashboardDTO>({ queryKey: queryKeys.dashboard, queryFn: () => get<DashboardDTO>('/api/dashboard') });
+   787→}
+   788→
+   789→export function useReports(from?: string, to?: string) {
+   790→  const params = new URLSearchParams();
+   791→  if (from) params.set('from', from);
+   792→  if (to) params.set('to', to);
+   793→  const qs = params.toString();
+   794→  return useQuery<ReportsDTO>({
+   795→    queryKey: queryKeys.reports(from, to),
+   796→    queryFn: () => get<ReportsDTO>(`/api/reports${qs ? `?${qs}` : ''}`),
+   797→  });
+   798→}
+   799→
+   800→export function useInsights() {
+   801→  return useQuery<AiInsightDTO[]>({ queryKey: queryKeys.insights, queryFn: () => get<AiInsightDTO[]>('/api/insights') });
+   802→}
+   803→
+   804→export function useGenerateInsight() {
+   805→  const qc = useQueryClient();
+   806→  return useMutation({
+   807→    mutationFn: () => post<AiInsightDTO>('/api/insights/generate', {}),
+   808→    onSuccess: () => void qc.invalidateQueries({ queryKey: queryKeys.insights }),
+   809→  });
+   810→}
+   811→
+   812→// ---------------------------------------------------------------------------
+   813→// Helpers
+   814→// ---------------------------------------------------------------------------
+   815→
+   816→export function useMemberships(): MembershipDTO[] {
+   817→  const { data } = useAuthContext();
+   818→  return data?.organizations ?? [];
+   819→}
+   820→

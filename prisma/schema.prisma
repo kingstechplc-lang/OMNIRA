@@ -1,0 +1,795 @@
+// =====================================================================
+// OMNIRA — Universal Multi-Tenant Point of Sale
+// Copyright KINGSTECH PLC. Evolved from the PHARMORA platform
+// architecture ("One Platform. Every Pharmacy." → "One Platform.
+// Every Business.").
+//
+// Conventions (inherited from Pharmora)
+//  - UUID primary keys (client-generated via Prisma uuid())
+//  - Every tenant-owned entity carries organizationId (tenant isolation)
+//  - Composite unique constraints scoped per tenant (never global)
+//  - Money as Decimal (14,2-equivalent), tax rates as Decimal — never
+//    floating point in the database
+//  - SQLite: enum-like fields are String constants validated by Zod in
+//    the API layer (see src/lib/constants.ts)
+//
+// Universal business support (new in OMNIRA)
+//  - Organization.businessType — a retail vertical pack (supermarket,
+//    pharmacy, restaurant, fashion, electronics, hardware, beauty,
+//    liquor, bookstore, wholesale, service, general)
+//  - Product.trackBatches — perishable/expiry tracking is optional per
+//    product (on by default for pharmacy/grocery packs, off elsewhere)
+//  - Loyalty accrual on customers; tax per product; multi-warehouse
+// =====================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// =====================================================================
+// CORE — IDENTITY, TENANCY, RBAC, PLATFORM
+// =====================================================================
+
+/// Platform-level identity. Users join organizations via Membership.
+model User {
+  id               String   @id @default(uuid())
+  email            String   @unique
+  passwordHash     String
+  fullName         String
+  phone            String?
+  avatarUrl        String?
+  platformRole     String   @default("PLATFORM_USER") // PLATFORM_USER | PLATFORM_ADMIN
+  status           String   @default("ACTIVE") // ACTIVE | SUSPENDED
+  lastLoginAt      DateTime?
+  failedLoginCount Int      @default(0)
+  lockedUntil      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  deletedAt        DateTime?
+
+  memberships     Membership[]
+  userRoles       UserRole[]
+  auditLogs       AuditLog[]      @relation("AuditActor")
+  salesAsCashier  Sale[]          @relation("SaleCashier")
+  voidedSales     Sale[]          @relation("SaleVoider")
+  receivedPayments Payment[]
+  refundsIssued   Refund[]
+  transfersMade   StockTransfer[] @relation("TransferActor")
+  adjustmentsMade StockAdjustment[] @relation("AdjustmentActor")
+  posCreated      PurchaseOrder[] @relation("POCreator")
+  posApproved     PurchaseOrder[] @relation("POApprover")
+  expensesCreated Expense[]       @relation("ExpenseCreator")
+  expensesPaid    Expense[]       @relation("ExpensePayer")
+  stockMovements  StockMovement[]
+  cashOpened      CashSession[]   @relation("CashOpener")
+  cashClosed      CashSession[]   @relation("CashCloser")
+
+  @@index([status])
+  @@index([platformRole])
+}
+
+/// The tenant — any kind of business. Every tenant-owned entity references this.
+model Organization {
+  id          String   @id @default(uuid())
+  name        String
+  slug        String   @unique
+  businessType String  @default("GENERAL") // see BUSINESS_TYPES in constants
+  legalName   String?
+  taxNumber   String?
+  contactEmail String?
+  contactPhone String?
+  addressLine1 String?
+  city        String?
+  region      String?
+  country     String   @default("GH")
+  timezone    String   @default("UTC")
+  currency    String   @default("GHS")
+  locale      String   @default("en")
+  status      String   @default("ACTIVE") // ACTIVE | SUSPENDED
+
+  // Point-of-sale configuration (typed settings, org-scoped)
+  defaultTaxRate  Decimal @default(0) // percentage applied to new products
+  taxEnabled      Boolean @default(true)
+  receiptHeader   String?
+  receiptFooter   String?
+  lowStockThreshold Int  @default(5)
+  loyaltyEnabled  Boolean @default(false)
+  loyaltyPointsPerUnit Decimal @default(0) // points accrued per 1.00 currency unit spent
+  branding        Json? // { logoUrl, primaryColor }
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  deletedAt DateTime?
+
+  memberships     Membership[]
+  branches        Branch[]
+  warehouses      Warehouse[]
+  roles           Role[]
+  auditLogs       AuditLog[]
+  productCategories ProductCategory[]
+  suppliers       Supplier[]
+  products        Product[]
+  stockTransfers  StockTransfer[]
+  stockAdjustments StockAdjustment[]
+  purchaseOrders  PurchaseOrder[]
+  customers       Customer[]
+  sales           Sale[]
+  cashSessions    CashSession[]
+  expenses        Expense[]
+  aiInsights      AiInsight[]
+  subscription    Subscription?
+
+  @@index([status])
+  @@index([businessType])
+  @@index([createdAt])
+}
+
+/// Join table: user ↔ organization. The root of tenant membership.
+model Membership {
+  id             String   @id @default(uuid())
+  userId         String
+  organizationId String
+  status         String   @default("ACTIVE") // ACTIVE | SUSPENDED
+  isDefault      Boolean  @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, organizationId])
+  @@index([organizationId])
+  @@index([userId, status])
+}
+
+model Branch {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  code           String // short code used on receipts/reports, unique per org
+  addressLine1   String?
+  city           String?
+  country        String?
+  phone          String?
+  email          String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  warehouses   Warehouse[]
+  purchaseOrders PurchaseOrder[]
+  sales        Sale[]
+  cashSessions CashSession[]
+  expenses     Expense[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+model Warehouse {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String?
+  name           String
+  code           String
+  type           String   @default("BACKROOM") // SALES_FLOOR | BACKROOM | CENTRAL | DISPATCH
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  inventory    InventoryItem[]
+  batches      Batch[]
+  stockMovements StockMovement[]
+  transfersOut StockTransfer[] @relation("TransferSource")
+  transfersIn  StockTransfer[] @relation("TransferDest")
+  adjustments  StockAdjustment[]
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+// ----- RBAC -----------------------------------------------------------
+
+/// Permission registry (seeded from src/lib/permissions/catalog.ts).
+model Permission {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  module      String
+  action      String
+  description String
+  createdAt   DateTime @default(now())
+
+  roles RolePermission[]
+}
+
+/// Org-scoped roles. organizationId = null → system template (cloned on org creation).
+model Role {
+  id             String   @id @default(uuid())
+  organizationId String? // null = system template
+  key            String // e.g. ORG_ADMIN, MANAGER, CASHIER, custom
+  name           String
+  description    String?
+  isSystem       Boolean  @default(false) // template roles cloned into every org
+  isEditable     Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization?    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  rolePermissions RolePermission[]
+  userRoles    UserRole[]
+
+  @@unique([organizationId, key])
+  @@index([organizationId])
+}
+
+model RolePermission {
+  id           String   @id @default(uuid())
+  roleId       String
+  permissionId String
+  createdAt    DateTime @default(now())
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permissionId])
+  @@index([roleId])
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String
+  roleId    String
+  branchId  String? // reserved for per-branch scoping
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([userId])
+  @@index([roleId])
+}
+
+// ----- Audit & platform billing ---------------------------------------
+
+/// Immutable activity trail. organizationId is derived server-side.
+model AuditLog {
+  id             String   @id @default(uuid())
+  organizationId String? // null = platform-scoped event
+  actorId        String?
+  action         String // e.g. auth.login.success, sale.created
+  entityType     String?
+  entityId       String?
+  summary        String?
+  metadata       Json? // before/after state, reason, amounts…
+  ipAddress      String?
+  userAgent      String?
+  createdAt      DateTime @default(now())
+
+  actor       User?          @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([action])
+}
+
+model Plan {
+  id          String   @id @default(uuid())
+  code        String   @unique // STARTER | GROWTH | ENTERPRISE
+  name        String
+  description String?
+  priceMonthly Decimal  @default(0)
+  currency    String   @default("USD")
+  maxUsers    Int      @default(5)
+  maxBranches Int      @default(1)
+  maxProducts Int      @default(500)
+  trialDays   Int      @default(14)
+  features    Json? // highlighted feature list
+  isActive    Boolean  @default(true)
+  sortOrder   Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  subscriptions Subscription[]
+}
+
+model Subscription {
+  id             String   @id @default(uuid())
+  organizationId String   @unique
+  planId         String
+  status         String   @default("TRIALING") // TRIALING | ACTIVE | PAST_DUE | CANCELLED
+  currentPeriodStart DateTime @default(now())
+  currentPeriodEnd   DateTime
+  cancelAtPeriodEnd  Boolean @default(false)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  plan         Plan         @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([status])
+}
+
+// =====================================================================
+// CATALOG — products, categories, suppliers (universal)
+// =====================================================================
+
+model ProductCategory {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  description    String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products     Product[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+model Supplier {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  contactPerson  String?
+  email          String?
+  phone          String?
+  addressLine1   String?
+  city           String?
+  country        String?
+  taxNumber      String?
+  notes          String?
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  products     Product[]        @relation("DefaultSupplier")
+  purchaseOrders PurchaseOrder[]
+
+  @@unique([organizationId, name])
+  @@index([organizationId])
+}
+
+/// Universal product — works for a supermarket shelf item, a restaurant
+/// menu dish, a pharmacy drug, a fashion SKU or a billed service.
+model Product {
+  id             String   @id @default(uuid())
+  organizationId String
+  sku            String // internal stock code, unique per tenant
+  barcode        String?
+  name           String
+  description    String?
+  brand          String? // universal (replaces Pharmora's manufacturer FK)
+  unit           String   @default("piece") // piece, kg, litre, pack, hour, service…
+  categoryId     String?
+  supplierId     String?
+
+  costPrice      Decimal  @default(0)
+  retailPrice    Decimal  @default(0)
+  taxRate        Decimal  @default(0) // percentage, e.g. 15 = 15%
+
+  trackBatches   Boolean  @default(false) // expiry/lot tracking (pharmacy, grocery…)
+  isService      Boolean  @default(false) // non-stock items (services, fees)
+  minStockLevel  Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  deletedAt      DateTime?
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  category     ProductCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  supplier     Supplier?        @relation("DefaultSupplier", fields: [supplierId], references: [id], onDelete: SetNull)
+  inventory    InventoryItem[]
+  batches      Batch[]
+  stockMovements StockMovement[]
+  transferItems StockTransferItem[]
+  adjustmentItems StockAdjustmentItem[]
+  poItems      PurchaseOrderItem[]
+  saleItems    SaleItem[]
+  refundItems  RefundItem[]
+
+  @@unique([organizationId, sku])
+  @@index([organizationId, name])
+  @@index([organizationId, isActive])
+  @@index([categoryId])
+}
+
+// =====================================================================
+// INVENTORY — stock pools, optional batches, movements journal
+// =====================================================================
+
+model InventoryItem {
+  id             String   @id @default(uuid())
+  organizationId String
+  productId      String
+  warehouseId    String
+  quantityOnHand Int      @default(0)
+  quantityReserved Int    @default(0)
+  updatedAt      DateTime @updatedAt
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, warehouseId])
+  @@index([warehouseId])
+  @@index([organizationId])
+}
+
+/// Lot/expiry tracking — only used when product.trackBatches = true.
+model Batch {
+  id             String   @id @default(uuid())
+  organizationId String
+  productId      String
+  warehouseId    String
+  batchNumber    String
+  expiryDate     DateTime?
+  quantity       Int      @default(0)
+  costPrice      Decimal?
+  receivedAt     DateTime @default(now())
+  createdAt      DateTime @default(now())
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+
+  @@unique([productId, warehouseId, batchNumber])
+  @@index([organizationId, expiryDate])
+}
+
+/// Universal stock journal. quantityDelta signed; referenceId polymorphic.
+model StockMovement {
+  id             String   @id @default(uuid())
+  organizationId String
+  productId      String
+  warehouseId    String
+  batchId        String?
+  type           String // PURCHASE_RECEIPT | SALE | SALE_RETURN | TRANSFER_OUT | TRANSFER_IN | ADJUSTMENT | OPENING_STOCK | DAMAGE
+  quantityDelta  Int
+  balanceAfter   Int
+  referenceType  String? // PurchaseOrder | Sale | Refund | StockTransfer | StockAdjustment
+  referenceId    String?
+  note           String?
+  actorId        String?
+  createdAt      DateTime @default(now())
+
+  product   Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  warehouse Warehouse @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  actor     User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, createdAt])
+  @@index([productId, createdAt])
+}
+
+model StockAdjustment {
+  id             String   @id @default(uuid())
+  organizationId String
+  warehouseId    String
+  reference      String // ADJ-XXXX sequence
+  reason         String // DAMAGE | THEFT | STOCK_COUNT | EXPIRY | OTHER
+  note           String?
+  status         String   @default("COMPLETED")
+  actorId        String?
+  createdAt      DateTime @default(now())
+
+  organization Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  warehouse    Warehouse        @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  actor        User?            @relation("AdjustmentActor", fields: [actorId], references: [id], onDelete: SetNull)
+  items        StockAdjustmentItem[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, createdAt])
+}
+
+model StockAdjustmentItem {
+  id              String @id @default(uuid())
+  adjustmentId    String
+  productId       String
+  systemQuantity  Int
+  countedQuantity Int
+  difference      Int // counted - system (signed)
+
+  adjustment StockAdjustment @relation(fields: [adjustmentId], references: [id], onDelete: Cascade)
+  product    Product         @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([adjustmentId])
+}
+
+model StockTransfer {
+  id                  String   @id @default(uuid())
+  organizationId      String
+  reference           String // TRF-XXXX sequence
+  sourceWarehouseId   String
+  destinationWarehouseId String
+  note                String?
+  status              String   @default("COMPLETED")
+  actorId             String?
+  createdAt           DateTime @default(now())
+
+  organization      Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sourceWarehouse   Warehouse    @relation("TransferSource", fields: [sourceWarehouseId], references: [id], onDelete: Cascade)
+  destinationWarehouse Warehouse @relation("TransferDest", fields: [destinationWarehouseId], references: [id], onDelete: Cascade)
+  actor             User?        @relation("TransferActor", fields: [actorId], references: [id], onDelete: SetNull)
+  items             StockTransferItem[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, createdAt])
+}
+
+model StockTransferItem {
+  id          String @id @default(uuid())
+  transferId  String
+  productId   String
+  quantity    Int
+
+  transfer StockTransfer @relation(fields: [transferId], references: [id], onDelete: Cascade)
+  product  Product       @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([transferId])
+}
+
+// =====================================================================
+// PURCHASING
+// =====================================================================
+
+model PurchaseOrder {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String?
+  warehouseId    String
+  supplierId     String?
+  reference      String // PO-XXXX sequence
+  status         String   @default("DRAFT") // DRAFT | SUBMITTED | APPROVED | PARTIALLY_RECEIVED | RECEIVED | CANCELLED
+  expectedDate   DateTime?
+  note           String?
+  createdById    String?
+  approvedById   String?
+  approvedAt     DateTime?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?         @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  warehouse    Warehouse       @relation(fields: [warehouseId], references: [id], onDelete: Cascade)
+  supplier     Supplier?       @relation(fields: [supplierId], references: [id], onDelete: SetNull)
+  createdBy    User?           @relation("POCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  approvedBy   User?           @relation("POApprover", fields: [approvedById], references: [id], onDelete: SetNull)
+  items        PurchaseOrderItem[]
+
+  @@unique([organizationId, reference])
+  @@index([organizationId, createdAt])
+  @@index([status])
+}
+
+model PurchaseOrderItem {
+  id            String  @id @default(uuid())
+  purchaseOrderId String
+  productId     String
+  quantity      Int
+  quantityReceived Int  @default(0)
+  unitCost      Decimal
+  note          String?
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([purchaseOrderId])
+}
+
+// =====================================================================
+// COMMERCE — customers, sales, payments, refunds, cash control
+// =====================================================================
+
+model Customer {
+  id             String   @id @default(uuid())
+  organizationId String
+  name           String
+  phone          String?
+  email          String?
+  addressLine1   String?
+  city           String?
+  notes          String?
+  loyaltyPoints  Int      @default(0)
+  totalSpent     Decimal  @default(0)
+  visitCount     Int      @default(0)
+  isActive       Boolean  @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  sales        Sale[]
+
+  @@unique([organizationId, phone])
+  @@index([organizationId, name])
+}
+
+model Sale {
+  id              String   @id @default(uuid())
+  organizationId  String
+  branchId        String?
+  warehouseId     String?
+  saleNumber      String
+  cashierId       String?
+  customerId      String?
+  clientRequestId String? // POS idempotency key (replay safety)
+  source          String   @default("POS") // POS | ONLINE | IMPORT
+
+  subtotal        Decimal  @default(0)
+  taxTotal        Decimal  @default(0)
+  discountTotal   Decimal  @default(0)
+  grandTotal      Decimal  @default(0)
+  costTotal       Decimal  @default(0) // COGS snapshot for profit reporting
+
+  status          String   @default("COMPLETED") // COMPLETED | VOIDED | REFUNDED | PARTIALLY_REFUNDED
+  voidedById      String?
+  voidedAt        DateTime?
+  voidReason      String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  cashier      User?        @relation("SaleCashier", fields: [cashierId], references: [id], onDelete: SetNull)
+  customer     Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  voidedBy     User?        @relation("SaleVoider", fields: [voidedById], references: [id], onDelete: SetNull)
+  items        SaleItem[]
+  payments     Payment[]
+  refunds      Refund[]
+
+  @@unique([organizationId, saleNumber])
+  @@unique([organizationId, clientRequestId])
+  @@index([organizationId, createdAt])
+  @@index([branchId, createdAt])
+  @@index([customerId])
+  @@index([status])
+}
+
+model SaleItem {
+  id          String  @id @default(uuid())
+  saleId      String
+  productId   String?
+  batchId     String?
+  // snapshot at sale time (product may change later)
+  productName String
+  sku         String
+  unitPrice   Decimal
+  unitCost    Decimal  @default(0)
+  quantity    Int
+  lineDiscount Decimal @default(0)
+  taxRate     Decimal  @default(0)
+  lineTotal   Decimal  @default(0)
+
+  sale    Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+  refundItems RefundItem[]
+
+  @@index([saleId])
+  @@index([productId])
+}
+
+model Payment {
+  id        String   @id @default(uuid())
+  saleId    String
+  method    String // CASH | CARD | MOBILE_MONEY | BANK_TRANSFER | CREDIT
+  amount    Decimal
+  reference String? // card auth code / momo transaction id
+  receivedById String?
+  createdAt DateTime @default(now())
+
+  sale       Sale  @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  receivedBy User? @relation(fields: [receivedById], references: [id], onDelete: SetNull)
+
+  @@index([saleId])
+}
+
+model Refund {
+  id        String   @id @default(uuid())
+  saleId    String
+  amount    Decimal
+  reason    String
+  restock   Boolean  @default(true)
+  issuedById String?
+  createdAt DateTime @default(now())
+
+  sale       Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  issuedBy   User?        @relation(fields: [issuedById], references: [id], onDelete: SetNull)
+  items      RefundItem[]
+
+  @@index([saleId])
+  @@index([createdAt])
+}
+
+model RefundItem {
+  id       String @id @default(uuid())
+  refundId String
+  saleItemId String
+  productId String?
+  quantity Int
+
+  refund   Refund    @relation(fields: [refundId], references: [id], onDelete: Cascade)
+  saleItem SaleItem  @relation(fields: [saleItemId], references: [id], onDelete: Cascade)
+  product  Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([refundId])
+}
+
+model CashSession {
+  id              String   @id @default(uuid())
+  organizationId  String
+  branchId        String?
+  warehouseId     String?
+  sessionNumber   String
+  openedById      String
+  openedAt        DateTime @default(now())
+  openingFloat    Decimal  @default(0)
+  closedAt        DateTime?
+  closedById      String?
+  expectedCash    Decimal?
+  countedCash     Decimal?
+  variance        Decimal?
+  note            String?
+  status          String   @default("OPEN") // OPEN | CLOSED
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  openedBy     User         @relation("CashOpener", fields: [openedById], references: [id], onDelete: Cascade)
+  closedBy     User?        @relation("CashCloser", fields: [closedById], references: [id], onDelete: SetNull)
+
+  @@unique([organizationId, sessionNumber])
+  @@index([organizationId, status])
+  @@index([openedById])
+}
+
+// =====================================================================
+// FINANCE-LITE & INTELLIGENCE
+// =====================================================================
+
+model Expense {
+  id             String   @id @default(uuid())
+  organizationId String
+  branchId       String?
+  category       String // RENT | UTILITIES | SALARIES | TRANSPORT | SUPPLIES | MARKETING | MAINTENANCE | OTHER
+  description    String
+  amount         Decimal
+  status         String   @default("PAID") // PENDING | PAID
+  expenseDate    DateTime @default(now())
+  paidAt         DateTime?
+  createdById    String?
+  paidById       String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  createdBy    User?        @relation("ExpenseCreator", fields: [createdById], references: [id], onDelete: SetNull)
+  paidBy       User?        @relation("ExpensePayer", fields: [paidById], references: [id], onDelete: SetNull)
+
+  @@index([organizationId, expenseDate])
+}
+
+model AiInsight {
+  id             String   @id @default(uuid())
+  organizationId String
+  kind          String   @default("DIGEST") // DIGEST | FORECAST | ALERT
+  title         String
+  body          String // markdown
+  data          Json? // chart-ready payload
+  model         String? // which AI model produced it
+  createdAt     DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId, createdAt])
+}
