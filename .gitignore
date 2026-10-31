@@ -39,9 +39,6 @@ prisma/*.db
 # typescript
 *.tsbuildinfo
 
-# agent context (internal work records)
-agent-ctx/
-
 # sandbox scaffolding (not part of the product)
 tool-results/
 tests/
@@ -49,3 +46,7 @@ download/
 upload/
 examples/
 mini-services/
+skills/
+agent-ctx/
+.zscripts/
+Caddyfile
